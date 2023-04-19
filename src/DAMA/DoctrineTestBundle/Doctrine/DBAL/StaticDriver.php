@@ -3,13 +3,10 @@
 namespace DAMA\DoctrineTestBundle\Doctrine\DBAL;
 
 use Doctrine\DBAL\Driver;
-use Doctrine\DBAL\Driver\API\ExceptionConverter;
 use Doctrine\DBAL\Driver\Connection;
 use Doctrine\DBAL\Driver\Connection as DriverConnection;
-use Doctrine\DBAL\Platforms\AbstractPlatform;
-use Doctrine\DBAL\Schema\AbstractSchemaManager;
 
-class StaticDriver implements Driver
+class StaticDriver extends Driver\Middleware\AbstractDriverMiddleware
 {
     /**
      * @var Connection[]
@@ -29,37 +26,36 @@ class StaticDriver implements Driver
     public function __construct(Driver $underlyingDriver)
     {
         $this->underlyingDriver = $underlyingDriver;
+        parent::__construct($underlyingDriver);
     }
 
     public function connect(array $params): DriverConnection
     {
-        if (!self::$keepStaticConnections) {
-            return $this->underlyingDriver->connect($params);
+        if (!self::isKeepStaticConnections()
+            || !isset($params['dama.keep_static'])
+            || !$params['dama.keep_static']
+        ) {
+            return parent::connect($params);
         }
 
         $key = sha1(json_encode($params));
 
         if (!isset(self::$connections[$key])) {
-            self::$connections[$key] = $this->underlyingDriver->connect($params);
+            self::$connections[$key] = parent::connect($params);
             self::$connections[$key]->beginTransaction();
         }
 
-        return new StaticConnection(self::$connections[$key]);
-    }
+        $connection = self::$connections[$key];
 
-    public function getSchemaManager(\Doctrine\DBAL\Connection $conn, AbstractPlatform $platform): AbstractSchemaManager
-    {
-        return $this->underlyingDriver->getSchemaManager($conn, $platform);
-    }
+        $platform = isset($params['serverVersion'])
+            ? $this->createDatabasePlatformForVersion($params['serverVersion'])
+            : $this->getDatabasePlatform();
 
-    public function getExceptionConverter(): ExceptionConverter
-    {
-        return $this->underlyingDriver->getExceptionConverter();
-    }
+        if (!$platform->supportsSavepoints() || !$platform->supportsReleaseSavepoints()) {
+            throw new \RuntimeException('This bundle only works for database platforms that support savepoints.');
+        }
 
-    public function getDatabasePlatform(): AbstractPlatform
-    {
-        return $this->underlyingDriver->getDatabasePlatform();
+        return new StaticConnection($connection, $platform);
     }
 
     public static function setKeepStaticConnections(bool $keepStaticConnections): void
